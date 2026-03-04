@@ -34,5 +34,5 @@ def consultar_censo(consulta_sql: str) -> str:
         return f"Error ejecutando SQL: {str(e)}"
 
 if __name__ == "__main__":
-    # Inicia el servidor MCP
-    mcp.run()
+    # Inicia el servidor MCP en modo web (SSE) para Render
+    mcp.run(transport='sse', host='0.0.0.0', port=int(os.environ.get("PORT", 8000)))
