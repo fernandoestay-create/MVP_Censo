@@ -15,6 +15,13 @@ class QueryRequest(BaseModel):
 
 @app.post("/consultar")
 def consultar_censo(request: QueryRequest):
+    """
+    Ejecuta una consulta SQL en MotherDuck.
+    Tablas exclusivas a utilizar: 
+    - hogares_censo2024
+    - personas_censo2024
+    - viviendas_censo_2024
+    """
     try:
         # La base de datos hace el cálculo exacto
         resultado = con.execute(request.consulta_sql).df()
