@@ -1,39 +1,24 @@
-from mcp.server.fastmcp import FastMCP
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 import duckdb
 import os
 
-# Inicializamos el servidor MCP
-mcp = FastMCP("CensoEstadistico")
+app = FastAPI(title="API Censo Estadistico")
 
-# Conectamos a MotherDuck usando el token que guardaremos en Render
+# Conectamos a MotherDuck
 token = os.environ.get("MOTHERDUCK_TOKEN")
 con = duckdb.connect(f'md:?motherduck_token={token}')
 
-@mcp.tool()
-def consultar_censo(consulta_sql: str) -> str:
-    """
-    Ejecuta una consulta SQL en MotherDuck sobre los datos estadísticos del Censo de Chile.
-    
-    Tablas disponibles estimadas:
-    - microdato_censo2017_categorias
-    - Microdato_Censo2017_Hogares
-    - Microdato_Censo2017_Viviendas
-    - microdato_censo2017_areas
-    - hogares_censo2024
-    - viviendas_censo2024
-    
-    INSTRUCCIÓN PARA EL LLM: Si no conoces las columnas exactas de una tabla, 
-    ejecuta primero 'DESCRIBE nombre_tabla;' o 'SHOW TABLES;' para entender 
-    la estructura de los datos antes de realizar el cálculo estadístico final.
-    """
-    try:
-        # Ejecuta la consulta y convierte el resultado a formato JSON de texto
-        resultado = con.execute(consulta_sql).df()
-        return resultado.to_json(orient="records")
-    except Exception as e:
-        return f"Error ejecutando SQL: {str(e)}"
+# Definimos el formato que ChatGPT nos enviará
+class QueryRequest(BaseModel):
+    consulta_sql: str
 
-if __name__ == "__main__":
-    # Inicia el servidor MCP en modo web (SSE) para Render, 
-    # dejando que la librería asigne el puerto y host automáticamente.
-    mcp.run(transport='sse')
+@app.post("/consultar")
+def consultar_censo(request: QueryRequest):
+    try:
+        # La base de datos hace el cálculo exacto
+        resultado = con.execute(request.consulta_sql).df()
+        # Se devuelve en formato JSON que ChatGPT puede leer fácilmente
+        return resultado.to_dict(orient="records")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
