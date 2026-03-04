@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import duckdb
 import os
+import uvicorn
 
 app = FastAPI(title="API Censo Estadistico")
 
@@ -29,3 +30,9 @@ def consultar_censo(request: QueryRequest):
         return resultado.to_dict(orient="records")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+if __name__ == "__main__":
+    # Esta es la pieza clave: forzamos a que escuche en internet (0.0.0.0) 
+    # y tome el puerto dinámico que Render exige.
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
