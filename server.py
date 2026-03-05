@@ -9,11 +9,9 @@ from pydantic import BaseModel
 app = FastAPI(title="API Censo 2024 - Fernando Estay")
 
 # 2. Configuración de Seguridad (API KEY)
-# El nombre del encabezado debe coincidir exactamente con el que pongas en ChatGPT
 API_KEY_NAME = "X-API-KEY"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
-# Obtenemos la llave desde las variables de entorno de Render
 CHATGPT_API_KEY = os.environ.get("CHATGPT_API_KEY")
 
 async def validate_api_key(api_key: str = Depends(api_key_header)):
@@ -26,12 +24,20 @@ async def validate_api_key(api_key: str = Depends(api_key_header)):
 
 # 3. Conexión a Base de Datos (MotherDuck)
 MOTHERDUCK_TOKEN = os.environ.get("MOTHERDUCK_TOKEN")
-# Iniciamos la conexión global
 con = duckdb.connect(f'md:?motherduck_token={MOTHERDUCK_TOKEN}')
 
 # 4. Modelo de Datos para la Consulta
 class SQLQuery(BaseModel):
     consulta_sql: str
+
+# ---> ESTA ES LA ÚNICA PIEZA NUEVA (Ruta pública para OpenAI sin API Key) <---
+@app.get("/")
+def politica_privacidad():
+    """Ruta libre para que OpenAI valide la política y permita compartir el GPT."""
+    return {
+        "Privacy Policy": "Esta es una API privada para consultas estadisticas del Censo. No recopila, almacena ni comparte datos personales."
+    }
+# ------------------------------------------------------------------------------
 
 # 5. Endpoint Principal
 @app.post("/consultar")
@@ -41,16 +47,12 @@ async def ejecutar_consulta(query: SQLQuery, authenticated: str = Depends(valida
     Requiere autenticación mediante el encabezado X-API-KEY.
     """
     try:
-        # Ejecutamos la consulta y convertimos a DataFrame, luego a Diccionario
         df = con.execute(query.consulta_sql).df()
         return df.to_dict(orient="records")
     except Exception as e:
-        # En caso de error en el SQL, devolvemos el detalle para que el GPT pueda corregirlo
         raise HTTPException(status_code=400, detail=f"Error en SQL: {str(e)}")
 
 # 6. Inicio del Servidor
 if __name__ == "__main__":
-    # Render asigna automáticamente un puerto en la variable PORT
     port = int(os.environ.get("PORT", 8000))
-    # Importante: host 0.0.0.0 para que sea accesible externamente
     uvicorn.run(app, host="0.0.0.0", port=port)
