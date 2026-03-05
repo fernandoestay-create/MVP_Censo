@@ -24,22 +24,25 @@ async def validate_api_key(api_key: str = Depends(api_key_header)):
 
 # 3. Conexión a Base de Datos (MotherDuck)
 MOTHERDUCK_TOKEN = os.environ.get("MOTHERDUCK_TOKEN")
-con = duckdb.connect(f'md:?motherduck_token={MOTHERDUCK_TOKEN}')
+
+# ---> CORRECCIÓN AQUÍ: Conexión directa a tu base de datos <---
+# Si en MotherDuck le pusiste otro nombre a tu base de datos (ej: base_censo), 
+# cambia la palabra CENSO por ese nombre exacto.
+con = duckdb.connect(f'md:CENSO?motherduck_token={MOTHERDUCK_TOKEN}')
 
 # 4. Modelo de Datos para la Consulta
 class SQLQuery(BaseModel):
     consulta_sql: str
 
-# ---> ESTA ES LA ÚNICA PIEZA NUEVA (Ruta pública para OpenAI sin API Key) <---
+# 5. Ruta Pública para Privacidad (Para que OpenAI deje compartir)
 @app.get("/")
 def politica_privacidad():
     """Ruta libre para que OpenAI valide la política y permita compartir el GPT."""
     return {
         "Privacy Policy": "Esta es una API privada para consultas estadisticas del Censo. No recopila, almacena ni comparte datos personales."
     }
-# ------------------------------------------------------------------------------
 
-# 5. Endpoint Principal
+# 6. Endpoint Principal
 @app.post("/consultar")
 async def ejecutar_consulta(query: SQLQuery, authenticated: str = Depends(validate_api_key)):
     """
@@ -52,7 +55,7 @@ async def ejecutar_consulta(query: SQLQuery, authenticated: str = Depends(valida
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error en SQL: {str(e)}")
 
-# 6. Inicio del Servidor
+# 7. Inicio del Servidor
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
