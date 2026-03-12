@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-duckdb
+duckdb==1.4.4
 pydantic
 pandas
 plotly
