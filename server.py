@@ -1,235 +1,210 @@
 import os
-import io
-import base64
-import duckdb
 import uvicorn
-import pandas as pd
-import plotly.express as px
-
-from typing import Optional
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security.api_key import APIKeyHeader
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from typing import Optional
 
+# ============================================================
+# MVP_Censo - Server optimizado para cold start rapido
+# Lazy imports: plotly, pandas, xlsxwriter, io, base64, duckdb
+# se cargan SOLO cuando se usan, no al arrancar
+# ============================================================
 
-# 1. Configuración de la Aplicación
 app = FastAPI(title="API Censo 2024 - Fernando Estay")
 
-
-# 2. Configuración de Seguridad (API KEY)
+# --- Seguridad ---
 API_KEY_NAME = "X-API-KEY"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
-
 CHATGPT_API_KEY = os.environ.get("CHATGPT_API_KEY")
-
 
 async def validate_api_key(api_key: str = Depends(api_key_header)):
     if api_key == CHATGPT_API_KEY:
         return api_key
-    raise HTTPException(
-        status_code=403,
-        detail="No autorizado: API Key inválida o ausente."
-    )
+    raise HTTPException(status_code=403, detail="No autorizado: API Key invalida o ausente.")
 
-
-# 3. Conexión a Base de Datos (MotherDuck)
+# --- Conexion LAZY a MotherDuck ---
+# NO se conecta al arrancar. Se conecta en la primera query.
+# Esto reduce el cold start en ~10-15 segundos.
 MOTHERDUCK_TOKEN = os.environ.get("MOTHERDUCK_TOKEN")
+_con = None
 
-if not MOTHERDUCK_TOKEN:
-    raise RuntimeError("Falta la variable de entorno MOTHERDUCK_TOKEN")
+def get_connection():
+    global _con
+    if _con is None:
+        import duckdb
+        _con = duckdb.connect(f'md:CENSO?motherduck_token={MOTHERDUCK_TOKEN}')
+    return _con
 
-# Cambia CENSO si tu base tiene otro nombre en MotherDuck
-con = duckdb.connect(f"md:CENSO?motherduck_token={MOTHERDUCK_TOKEN}")
-
-
-# 4. Modelos de Datos
+# --- Modelos ---
 class SQLQuery(BaseModel):
-    consulta_sql: str = Field(..., description="Consulta SQL a ejecutar")
+    consulta_sql: str
 
+class GraficarRequest(BaseModel):
+    consulta_sql: str
+    tipo_grafico: Optional[str] = Field(default="bar", description="bar, line, pie, scatter, histogram")
+    titulo: Optional[str] = Field(default="Grafico", description="Titulo del grafico")
+    eje_x: Optional[str] = Field(default=None, description="Columna para eje X")
+    eje_y: Optional[str] = Field(default=None, description="Columna para eje Y")
+    color: Optional[str] = Field(default=None, description="Columna para color/agrupacion")
 
-class ChartQuery(BaseModel):
-    consulta_sql: str = Field(..., description="Consulta SQL que devuelve los datos del gráfico")
-    chart_type: str = Field(..., description="Tipos soportados: bar, line, pie, scatter, histogram, box")
-    x: str = Field(..., description="Campo para eje X o categoría principal")
-    y: Optional[str] = Field(None, description="Campo para eje Y o valores")
-    color: Optional[str] = Field(None, description="Campo opcional para color/segmentación")
-    title: Optional[str] = Field("Gráfico", description="Título del gráfico")
-    output: Optional[str] = Field(
-        "json",
-        description="Salida: json, html, png_base64"
-    )
+class ExportRequest(BaseModel):
+    consulta_sql: str
+    nombre_archivo: Optional[str] = Field(default="export", description="Nombre del archivo sin extension")
 
+# --- Endpoints publicos (sin auth, respuesta inmediata) ---
 
-# 5. Ruta Pública para Privacidad
 @app.get("/")
 def politica_privacidad():
     return {
-        "Privacy Policy": (
-            "Esta es una API privada para consultas estadísticas del Censo. "
-            "No recopila, almacena ni comparte datos personales."
-        )
+        "Privacy Policy": "Esta es una API privada para consultas estadisticas del Censo. No recopila, almacena ni comparte datos personales."
     }
-
 
 @app.get("/health")
 def healthcheck():
+    """Health check rapido - NO toca MotherDuck para responder al instante."""
     return {"status": "ok"}
 
+# --- Endpoint principal: consultar ---
 
-# 6. Utilidades
-def ejecutar_sql_dataframe(consulta_sql: str) -> pd.DataFrame:
+@app.post("/consultar")
+async def ejecutar_consulta(query: SQLQuery, authenticated: str = Depends(validate_api_key)):
     try:
-        df = con.execute(consulta_sql).df()
-        return df
+        import pandas as pd
+        con = get_connection()
+        df = con.execute(query.consulta_sql).df()
+        return df.to_dict(orient="records")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error en SQL: {str(e)}")
 
+# --- Endpoint: graficar ---
 
-def construir_figura(df: pd.DataFrame, query: ChartQuery):
-    chart_type = query.chart_type.lower().strip()
-
-    if df.empty:
-        raise HTTPException(status_code=400, detail="La consulta no devolvió datos.")
-
-    if query.x not in df.columns:
-        raise HTTPException(status_code=400, detail=f"La columna x='{query.x}' no existe en el resultado.")
-    if query.y and query.y not in df.columns:
-        raise HTTPException(status_code=400, detail=f"La columna y='{query.y}' no existe en el resultado.")
-    if query.color and query.color not in df.columns:
-        raise HTTPException(status_code=400, detail=f"La columna color='{query.color}' no existe en el resultado.")
-
-    if chart_type == "bar":
-        if not query.y:
-            raise HTTPException(status_code=400, detail="El gráfico bar requiere el campo 'y'.")
-        fig = px.bar(df, x=query.x, y=query.y, color=query.color, title=query.title)
-
-    elif chart_type == "line":
-        if not query.y:
-            raise HTTPException(status_code=400, detail="El gráfico line requiere el campo 'y'.")
-        fig = px.line(df, x=query.x, y=query.y, color=query.color, title=query.title)
-
-    elif chart_type == "pie":
-        if not query.y:
-            raise HTTPException(status_code=400, detail="El gráfico pie requiere el campo 'y'.")
-        fig = px.pie(df, names=query.x, values=query.y, color=query.color, title=query.title)
-
-    elif chart_type == "scatter":
-        if not query.y:
-            raise HTTPException(status_code=400, detail="El gráfico scatter requiere el campo 'y'.")
-        fig = px.scatter(df, x=query.x, y=query.y, color=query.color, title=query.title)
-
-    elif chart_type == "histogram":
-        fig = px.histogram(df, x=query.x, y=query.y, color=query.color, title=query.title)
-
-    elif chart_type == "box":
-        if not query.y:
-            raise HTTPException(status_code=400, detail="El gráfico box requiere el campo 'y'.")
-        fig = px.box(df, x=query.x, y=query.y, color=query.color, title=query.title)
-
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="Tipo de gráfico no soportado. Usa: bar, line, pie, scatter, histogram o box."
-        )
-
-    fig.update_layout(template="plotly_white")
-    return fig
-
-
-# 7. Endpoint Principal SQL
-@app.post("/consultar")
-async def ejecutar_consulta(
-    query: SQLQuery,
-    authenticated: str = Depends(validate_api_key)
-):
-    df = ejecutar_sql_dataframe(query.consulta_sql)
-    return df.to_dict(orient="records")
-
-
-# 8. Endpoint para gráficos
 @app.post("/graficar")
-async def graficar(
-    query: ChartQuery,
-    authenticated: str = Depends(validate_api_key)
-):
-    df = ejecutar_sql_dataframe(query.consulta_sql)
-    fig = construir_figura(df, query)
-
-    output = (query.output or "json").lower().strip()
-
-    if output == "html":
-        return HTMLResponse(content=fig.to_html(full_html=False, include_plotlyjs="cdn"))
-
-    if output == "png_base64":
-        try:
-            img_bytes = fig.to_image(format="png")
-            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-            return {"image_base64": img_b64}
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Error al exportar PNG: {str(e)}")
-
-    if output == "json":
-        return JSONResponse(content=fig.to_plotly_json())
-
-    raise HTTPException(status_code=400, detail="Output no soportado. Usa: json, html o png_base64.")
-
-
-# 9. Endpoint para exportar resultados a Excel
-@app.post("/exportar_excel")
-async def exportar_excel(
-    query: SQLQuery,
-    authenticated: str = Depends(validate_api_key)
-):
-    df = ejecutar_sql_dataframe(query.consulta_sql)
-
-    if df.empty:
-        raise HTTPException(status_code=400, detail="La consulta no devolvió datos.")
-
-    output = io.BytesIO()
-
+async def graficar(request: GraficarRequest, authenticated: str = Depends(validate_api_key)):
     try:
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            df.to_excel(writer, index=False, sheet_name="resultados")
+        import pandas as pd
+        import plotly.express as px
+        import base64
+        import io
 
-        output.seek(0)
+        con = get_connection()
+        df = con.execute(request.consulta_sql).df()
+
+        if df.empty:
+            raise HTTPException(status_code=400, detail="La consulta no devolvio resultados.")
+
+        eje_x = request.eje_x or df.columns[0]
+        eje_y = request.eje_y or (df.columns[1] if len(df.columns) > 1 else df.columns[0])
+
+        chart_functions = {
+            "bar": px.bar,
+            "line": px.line,
+            "pie": px.pie,
+            "scatter": px.scatter,
+            "histogram": px.histogram,
+        }
+
+        chart_func = chart_functions.get(request.tipo_grafico, px.bar)
+
+        if request.tipo_grafico == "pie":
+            fig = chart_func(df, names=eje_x, values=eje_y, title=request.titulo, color=request.color)
+        else:
+            fig = chart_func(df, x=eje_x, y=eje_y, title=request.titulo, color=request.color)
+
+        fig.update_layout(template="plotly_white")
+
+        img_bytes = fig.to_image(format="png", width=900, height=500, scale=2)
+        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+
+        return {
+            "imagen_base64": img_base64,
+            "datos": df.to_dict(orient="records"),
+            "resumen": {
+                "filas": len(df),
+                "columnas": list(df.columns),
+                "tipo_grafico": request.tipo_grafico,
+                "titulo": request.titulo
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error al graficar: {str(e)}")
+
+# --- Endpoint: exportar Excel ---
+
+@app.post("/exportar_excel")
+async def exportar_excel(request: ExportRequest, authenticated: str = Depends(validate_api_key)):
+    try:
+        import pandas as pd
+        import io
+
+        con = get_connection()
+        df = con.execute(request.consulta_sql).df()
+
+        if df.empty:
+            raise HTTPException(status_code=400, detail="La consulta no devolvio resultados.")
+
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Datos')
+            workbook = writer.book
+            worksheet = writer.sheets['Datos']
+            header_format = workbook.add_format({
+                'bold': True,
+                'bg_color': '#2563EB',
+                'font_color': '#FFFFFF',
+                'border': 1
+            })
+            for col_num, value in enumerate(df.columns):
+                worksheet.write(0, col_num, value, header_format)
+                max_len = max(df[value].astype(str).map(len).max(), len(str(value))) + 2
+                worksheet.set_column(col_num, col_num, min(max_len, 40))
+
+        buffer.seek(0)
+        filename = f"{request.nombre_archivo}.xlsx"
 
         return StreamingResponse(
-            output,
+            buffer,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=resultados.xlsx"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error al exportar Excel: {str(e)}")
 
+# --- Endpoint: exportar CSV ---
 
-# 10. Endpoint para exportar resultados a CSV
 @app.post("/exportar_csv")
-async def exportar_csv(
-    query: SQLQuery,
-    authenticated: str = Depends(validate_api_key)
-):
-    df = ejecutar_sql_dataframe(query.consulta_sql)
-
-    if df.empty:
-        raise HTTPException(status_code=400, detail="La consulta no devolvió datos.")
-
-    output = io.StringIO()
-
+async def exportar_csv(request: ExportRequest, authenticated: str = Depends(validate_api_key)):
     try:
-        df.to_csv(output, index=False)
-        output.seek(0)
+        import pandas as pd
+        import io
+
+        con = get_connection()
+        df = con.execute(request.consulta_sql).df()
+
+        if df.empty:
+            raise HTTPException(status_code=400, detail="La consulta no devolvio resultados.")
+
+        buffer = io.StringIO()
+        df.to_csv(buffer, index=False)
+        buffer.seek(0)
+        filename = f"{request.nombre_archivo}.csv"
 
         return StreamingResponse(
-            iter([output.getvalue()]),
+            iter([buffer.getvalue()]),
             media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=resultados.csv"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error al exportar CSV: {str(e)}")
 
-
-# 11. Inicio del Servidor
+# --- Inicio ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
